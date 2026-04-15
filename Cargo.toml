@@ -8,7 +8,11 @@ repository = "https://github.com/metastable-void/philharmonic-store"
 readme = "README.md"
 rust-version = "1.85"
 
+keywords = ["philharmonic", "storage", "content-addressed", "entity"]
+categories = ["data-structures"]
+
 [dependencies]
 async-trait = "0.1"
-philharmonic-types = "0.2.0"
+philharmonic-types = "0.3.2"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
