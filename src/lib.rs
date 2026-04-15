@@ -10,7 +10,7 @@
 //!
 //! * [`ContentStore`]: content-addressed blob storage. Write once, read by
 //!   hash, never update. Grow-only.
-//! * [`IdentityStore`]: minting and resolving `(public, internal)` UUID
+//! * [`IdentityStore`]: minting and resolving `(internal, public)` UUID
 //!   identity pairs. Append-only.
 //! * [`EntityStore`]: entities and their append-only revision logs,
 //!   including content-ref, entity-ref, and scalar attributes per revision.

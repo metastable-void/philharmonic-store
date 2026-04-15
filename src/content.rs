@@ -87,10 +87,7 @@ pub trait ContentStoreExt: ContentStore {
     /// [`StoreError::Decode`] if the bytes exist but don't decode as `T`
     /// — usually a sign that the caller is asking for the wrong type, or
     /// that content at this hash was written under an incompatible schema.
-    async fn get_typed<T: Content>(
-        &self,
-        hash: ContentHash<T>,
-    ) -> Result<Option<T>, StoreError> {
+    async fn get_typed<T: Content>(&self, hash: ContentHash<T>) -> Result<Option<T>, StoreError> {
         let Some(value) = self.get(hash.as_digest()).await? else {
             return Ok(None);
         };

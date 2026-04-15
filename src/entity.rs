@@ -66,11 +66,7 @@ pub trait EntityStore: Send + Sync {
     /// identity's internal ID already exists (astronomically unlikely
     /// for freshly-minted identities, but possible if an identity is
     /// used twice by mistake).
-    async fn create_entity(
-        &self,
-        identity: Identity,
-        kind: Uuid,
-    ) -> Result<(), StoreError>;
+    async fn create_entity(&self, identity: Identity, kind: Uuid) -> Result<(), StoreError>;
 
     /// Retrieve the entity row for the given internal ID.
     ///
@@ -117,10 +113,8 @@ pub trait EntityStore: Send + Sync {
     /// Returns `None` if the entity doesn't exist or has no revisions
     /// yet. "Latest" means highest `revision_seq`; since sequences are
     /// monotonic per entity, this is unambiguous.
-    async fn get_latest_revision(
-        &self,
-        entity_id: Uuid,
-    ) -> Result<Option<RevisionRow>, StoreError>;
+    async fn get_latest_revision(&self, entity_id: Uuid)
+    -> Result<Option<RevisionRow>, StoreError>;
 
     /// List revisions that reference the given entity via the given
     /// attribute name.
@@ -181,10 +175,7 @@ pub trait EntityStoreExt: EntityStore {
     /// the entity row will have `kind = T::KIND`. Equivalent to calling
     /// [`create_entity`](EntityStore::create_entity) with the untyped
     /// identity and `T::KIND`, but expressed in one call.
-    async fn create_entity_typed<T: Entity>(
-        &self,
-        id: EntityId<T>,
-    ) -> Result<(), StoreError> {
+    async fn create_entity_typed<T: Entity>(&self, id: EntityId<T>) -> Result<(), StoreError> {
         self.create_entity(id.untyped(), T::KIND).await
     }
 
@@ -228,11 +219,14 @@ pub trait EntityStoreExt: EntityStore {
         input: &RevisionInput,
     ) -> Result<(), StoreError> {
         // Verify the entity kind matches before writing.
-        let _ = self.get_entity_typed::<T>(id).await?
-            .ok_or_else(|| StoreError::EntityNotFound {
-                entity_id: id.internal().as_uuid(),
-            })?;
-        self.append_revision(id.internal().as_uuid(), revision_seq, input).await
+        let _ =
+            self.get_entity_typed::<T>(id)
+                .await?
+                .ok_or_else(|| StoreError::EntityNotFound {
+                    entity_id: id.internal().as_uuid(),
+                })?;
+        self.append_revision(id.internal().as_uuid(), revision_seq, input)
+            .await
     }
 
     /// Retrieve a revision and verify the parent entity's kind matches `T`.
@@ -247,8 +241,11 @@ pub trait EntityStoreExt: EntityStore {
         id: EntityId<T>,
         revision_seq: u64,
     ) -> Result<Option<RevisionRow>, StoreError> {
-        let _ = self.get_entity_typed::<T>(id).await?;
-        self.get_revision(id.internal().as_uuid(), revision_seq).await
+        let Some(_) = self.get_entity_typed::<T>(id).await? else {
+            return Ok(None);
+        };
+        self.get_revision(id.internal().as_uuid(), revision_seq)
+            .await
     }
 
     /// Retrieve the latest revision of an entity and verify its kind
@@ -260,7 +257,9 @@ pub trait EntityStoreExt: EntityStore {
         &self,
         id: EntityId<T>,
     ) -> Result<Option<RevisionRow>, StoreError> {
-        let _ = self.get_entity_typed::<T>(id).await?;
+        let Some(_) = self.get_entity_typed::<T>(id).await? else {
+            return Ok(None);
+        };
         self.get_latest_revision(id.internal().as_uuid()).await
     }
 
