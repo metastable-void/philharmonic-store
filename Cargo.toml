@@ -17,3 +17,6 @@ async-trait = "0.1"
 philharmonic-types = "0.3.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

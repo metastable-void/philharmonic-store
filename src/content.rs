@@ -97,3 +97,131 @@ pub trait ContentStoreExt: ContentStore {
 }
 
 impl<S: ContentStore + ?Sized> ContentStoreExt for S {}
+
+#[cfg(test)]
+mod tests {
+    use crate::content::{ContentStore, ContentStoreExt};
+    use crate::error::StoreError;
+
+    use philharmonic_types::{CanonicalJson, ContentHash, ContentValue, Sha256};
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ContentCall {
+        Put { hash: Sha256 },
+        Get { hash: Sha256 },
+        Exists { hash: Sha256 },
+    }
+
+    struct MockContentStore {
+        blobs: Mutex<HashMap<Sha256, Vec<u8>>>,
+        calls: Mutex<Vec<ContentCall>>,
+    }
+
+    impl MockContentStore {
+        fn new() -> Self {
+            Self {
+                blobs: Mutex::new(HashMap::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn stored_bytes(&self, hash: Sha256) -> Option<Vec<u8>> {
+            self.blobs.lock().unwrap().get(&hash).cloned()
+        }
+
+        fn calls(&self) -> Vec<ContentCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ContentStore for MockContentStore {
+        async fn put(&self, value: &ContentValue) -> Result<(), StoreError> {
+            self.calls.lock().unwrap().push(ContentCall::Put {
+                hash: value.digest(),
+            });
+            self.blobs
+                .lock()
+                .unwrap()
+                .insert(value.digest(), value.bytes().to_vec());
+            Ok(())
+        }
+
+        async fn get(&self, hash: Sha256) -> Result<Option<ContentValue>, StoreError> {
+            self.calls.lock().unwrap().push(ContentCall::Get { hash });
+            let maybe = self
+                .blobs
+                .lock()
+                .unwrap()
+                .get(&hash)
+                .cloned()
+                .map(|bytes| ContentValue::from_parts_unchecked(hash, bytes));
+            Ok(maybe)
+        }
+
+        async fn exists(&self, hash: Sha256) -> Result<bool, StoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(ContentCall::Exists { hash });
+            Ok(self.blobs.lock().unwrap().contains_key(&hash))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn put_typed_stores_canonical_bytes() {
+        let store = MockContentStore::new();
+        let content = CanonicalJson::from_bytes(br#"{"z":3,"a":1}"#).unwrap();
+
+        let hash = store.put_typed(&content).await.unwrap();
+
+        assert_eq!(hash.as_digest(), content.digest());
+        let stored = store.stored_bytes(content.digest()).unwrap();
+        assert_eq!(stored, content.as_bytes());
+        assert_eq!(
+            store.calls(),
+            vec![ContentCall::Put {
+                hash: content.digest()
+            }]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_typed_decodes_existing_value() {
+        let store = MockContentStore::new();
+        let content = CanonicalJson::from_bytes(br#"{"k":"v"}"#).unwrap();
+        let hash = store.put_typed(&content).await.unwrap();
+
+        let got = store.get_typed::<CanonicalJson>(hash).await.unwrap();
+
+        assert_eq!(got, Some(content));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_typed_returns_none_when_missing() {
+        let store = MockContentStore::new();
+        let content = CanonicalJson::from_bytes(br#"{"missing":true}"#).unwrap();
+        let missing = ContentHash::<CanonicalJson>::from_digest_unchecked(content.digest());
+
+        let got = store.get_typed::<CanonicalJson>(missing).await.unwrap();
+
+        assert!(got.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_typed_returns_decode_error_for_invalid_bytes() {
+        let store = MockContentStore::new();
+        let value = ContentValue::new(vec![0x80, 0x81, 0x82]);
+        store.put(&value).await.unwrap();
+        let hash = ContentHash::<CanonicalJson>::from_digest_unchecked(value.digest());
+
+        let err = store.get_typed::<CanonicalJson>(hash).await.unwrap_err();
+
+        assert!(matches!(err, StoreError::Decode(_)));
+    }
+}

@@ -278,3 +278,389 @@ pub trait EntityStoreExt: EntityStore {
 }
 
 impl<S: EntityStore + ?Sized> EntityStoreExt for S {}
+
+#[cfg(test)]
+mod tests {
+    use crate::entity::{EntityRow, EntityStore, EntityStoreExt};
+    use crate::error::StoreError;
+    use crate::revision::{RevisionInput, RevisionRef, RevisionRow};
+
+    use philharmonic_types::{
+        ContentSlot, Entity, EntityId, EntitySlot, Identity, ScalarSlot, ScalarValue, UnixMillis,
+        Uuid,
+    };
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    struct TestEntityA;
+    struct TestEntityB;
+
+    impl Entity for TestEntityA {
+        const KIND: Uuid = Uuid::from_u128(0xAA);
+        const NAME: &'static str = "test_entity_a";
+        const CONTENT_SLOTS: &'static [ContentSlot] = &[];
+        const ENTITY_SLOTS: &'static [EntitySlot] = &[];
+        const SCALAR_SLOTS: &'static [ScalarSlot] = &[];
+    }
+
+    impl Entity for TestEntityB {
+        const KIND: Uuid = Uuid::from_u128(0xBB);
+        const NAME: &'static str = "test_entity_b";
+        const CONTENT_SLOTS: &'static [ContentSlot] = &[];
+        const ENTITY_SLOTS: &'static [EntitySlot] = &[];
+        const SCALAR_SLOTS: &'static [ScalarSlot] = &[];
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum EntityCall {
+        CreateEntity {
+            identity: Identity,
+            kind: Uuid,
+        },
+        GetEntity {
+            entity_id: Uuid,
+        },
+        AppendRevision {
+            entity_id: Uuid,
+            revision_seq: u64,
+        },
+        FindByScalar {
+            kind: Uuid,
+            attribute_name: String,
+            value: ScalarValue,
+        },
+    }
+
+    struct MockEntityStore {
+        entities: Mutex<HashMap<Uuid, EntityRow>>,
+        revisions: Mutex<HashMap<(Uuid, u64), RevisionRow>>,
+        find_by_scalar_response: Mutex<Vec<EntityRow>>,
+        calls: Mutex<Vec<EntityCall>>,
+    }
+
+    impl MockEntityStore {
+        fn new() -> Self {
+            Self {
+                entities: Mutex::new(HashMap::new()),
+                revisions: Mutex::new(HashMap::new()),
+                find_by_scalar_response: Mutex::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn insert_entity(&self, identity: Identity, kind: Uuid) {
+            self.entities.lock().unwrap().insert(
+                identity.internal,
+                EntityRow {
+                    identity,
+                    kind,
+                    created_at: UnixMillis(1),
+                },
+            );
+        }
+
+        fn set_find_by_scalar_response(&self, rows: Vec<EntityRow>) {
+            *self.find_by_scalar_response.lock().unwrap() = rows;
+        }
+
+        fn calls(&self) -> Vec<EntityCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn revision(&self, entity_id: Uuid, revision_seq: u64) -> Option<RevisionRow> {
+            self.revisions
+                .lock()
+                .unwrap()
+                .get(&(entity_id, revision_seq))
+                .cloned()
+        }
+    }
+
+    #[async_trait]
+    impl EntityStore for MockEntityStore {
+        async fn create_entity(&self, identity: Identity, kind: Uuid) -> Result<(), StoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(EntityCall::CreateEntity { identity, kind });
+            self.insert_entity(identity, kind);
+            Ok(())
+        }
+
+        async fn get_entity(&self, entity_id: Uuid) -> Result<Option<EntityRow>, StoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(EntityCall::GetEntity { entity_id });
+            Ok(self.entities.lock().unwrap().get(&entity_id).cloned())
+        }
+
+        async fn append_revision(
+            &self,
+            entity_id: Uuid,
+            revision_seq: u64,
+            input: &RevisionInput,
+        ) -> Result<(), StoreError> {
+            self.calls.lock().unwrap().push(EntityCall::AppendRevision {
+                entity_id,
+                revision_seq,
+            });
+            if !self.entities.lock().unwrap().contains_key(&entity_id) {
+                return Err(StoreError::EntityNotFound { entity_id });
+            }
+            self.revisions.lock().unwrap().insert(
+                (entity_id, revision_seq),
+                RevisionRow {
+                    entity_id,
+                    revision_seq,
+                    created_at: UnixMillis(2),
+                    content_attrs: input.content_attrs.clone(),
+                    entity_attrs: input.entity_attrs.clone(),
+                    scalar_attrs: input.scalar_attrs.clone(),
+                },
+            );
+            Ok(())
+        }
+
+        async fn get_revision(
+            &self,
+            entity_id: Uuid,
+            revision_seq: u64,
+        ) -> Result<Option<RevisionRow>, StoreError> {
+            Ok(self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(&(entity_id, revision_seq))
+                .cloned())
+        }
+
+        async fn get_latest_revision(
+            &self,
+            entity_id: Uuid,
+        ) -> Result<Option<RevisionRow>, StoreError> {
+            let revisions = self.revisions.lock().unwrap();
+            let latest = revisions
+                .values()
+                .filter(|row| row.entity_id == entity_id)
+                .max_by_key(|row| row.revision_seq)
+                .cloned();
+            Ok(latest)
+        }
+
+        async fn list_revisions_referencing(
+            &self,
+            target_entity_id: Uuid,
+            attribute_name: &str,
+        ) -> Result<Vec<RevisionRef>, StoreError> {
+            let refs = self
+                .revisions
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|row| {
+                    let attr = row.entity_attrs.get(attribute_name)?;
+                    if attr.target_entity_id == target_entity_id {
+                        Some(RevisionRef::new(row.entity_id, row.revision_seq))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Ok(refs)
+        }
+
+        async fn find_by_scalar(
+            &self,
+            kind: Uuid,
+            attribute_name: &str,
+            value: &ScalarValue,
+        ) -> Result<Vec<EntityRow>, StoreError> {
+            self.calls.lock().unwrap().push(EntityCall::FindByScalar {
+                kind,
+                attribute_name: attribute_name.to_string(),
+                value: value.clone(),
+            });
+            Ok(self.find_by_scalar_response.lock().unwrap().clone())
+        }
+    }
+
+    fn new_typed_id<T: Entity>() -> EntityId<T> {
+        Identity {
+            internal: Uuid::now_v7(),
+            public: Uuid::new_v4(),
+        }
+        .typed::<T>()
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_entity_typed_delegates_identity_and_kind() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+
+        store.create_entity_typed::<TestEntityA>(id).await.unwrap();
+
+        assert_eq!(
+            store.calls(),
+            vec![EntityCall::CreateEntity {
+                identity: id.untyped(),
+                kind: TestEntityA::KIND,
+            }]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_entity_typed_returns_some_for_matching_kind() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        store.insert_entity(id.untyped(), TestEntityA::KIND);
+
+        let row = store
+            .get_entity_typed::<TestEntityA>(id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(row.identity, id.untyped());
+        assert_eq!(row.kind, TestEntityA::KIND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_entity_typed_returns_kind_mismatch_for_wrong_kind() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        store.insert_entity(id.untyped(), TestEntityB::KIND);
+
+        let err = store.get_entity_typed::<TestEntityA>(id).await.unwrap_err();
+
+        match err {
+            StoreError::KindMismatch { expected, actual } => {
+                assert_eq!(expected, TestEntityA::KIND);
+                assert_eq!(actual, TestEntityB::KIND);
+            }
+            other => panic!("expected KindMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_entity_typed_returns_none_when_missing() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+
+        let row = store.get_entity_typed::<TestEntityA>(id).await.unwrap();
+
+        assert!(row.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_revision_typed_returns_entity_not_found_when_missing() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        let input = RevisionInput::new();
+
+        let err = store
+            .append_revision_typed::<TestEntityA>(id, 1, &input)
+            .await
+            .unwrap_err();
+
+        match err {
+            StoreError::EntityNotFound { entity_id } => {
+                assert_eq!(entity_id, id.internal().as_uuid());
+            }
+            other => panic!("expected EntityNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_revision_typed_returns_kind_mismatch_for_wrong_kind() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        store.insert_entity(id.untyped(), TestEntityB::KIND);
+        let input = RevisionInput::new();
+
+        let err = store
+            .append_revision_typed::<TestEntityA>(id, 2, &input)
+            .await
+            .unwrap_err();
+
+        match err {
+            StoreError::KindMismatch { expected, actual } => {
+                assert_eq!(expected, TestEntityA::KIND);
+                assert_eq!(actual, TestEntityB::KIND);
+            }
+            other => panic!("expected KindMismatch, got {other:?}"),
+        }
+        assert!(
+            !store
+                .calls()
+                .iter()
+                .any(|call| matches!(call, EntityCall::AppendRevision { .. }))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_revision_typed_delegates_with_internal_entity_id() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        store.insert_entity(id.untyped(), TestEntityA::KIND);
+        let input = RevisionInput::new().with_scalar("active", ScalarValue::Bool(true));
+
+        store
+            .append_revision_typed::<TestEntityA>(id, 7, &input)
+            .await
+            .unwrap();
+
+        assert!(store.calls().iter().any(|call| {
+            matches!(
+                call,
+                EntityCall::AppendRevision {
+                    entity_id,
+                    revision_seq
+                } if *entity_id == id.internal().as_uuid() && *revision_seq == 7
+            )
+        }));
+        let row = store.revision(id.internal().as_uuid(), 7).unwrap();
+        assert_eq!(
+            row.scalar_attrs.get("active"),
+            Some(&ScalarValue::Bool(true))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn find_by_scalar_typed_delegates_kind_argument() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        let expected_row = EntityRow {
+            identity: id.untyped(),
+            kind: TestEntityA::KIND,
+            created_at: UnixMillis(11),
+        };
+        store.set_find_by_scalar_response(vec![expected_row.clone()]);
+        let value = ScalarValue::Bool(false);
+
+        let rows = store
+            .find_by_scalar_typed::<TestEntityA>("active", &value)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity, expected_row.identity);
+        assert_eq!(rows[0].kind, expected_row.kind);
+        assert!(store.calls().iter().any(|call| {
+            matches!(
+                call,
+                EntityCall::FindByScalar {
+                    kind,
+                    attribute_name,
+                    value: observed,
+                } if *kind == TestEntityA::KIND
+                    && attribute_name == "active"
+                    && observed == &value
+            )
+        }));
+    }
+}

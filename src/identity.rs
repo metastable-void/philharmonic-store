@@ -136,3 +136,202 @@ pub trait IdentityStoreExt: IdentityStore {
 }
 
 impl<S: IdentityStore + ?Sized> IdentityStoreExt for S {}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::StoreError;
+    use crate::identity::{IdentityStore, IdentityStoreExt};
+
+    use philharmonic_types::{
+        ContentSlot, Entity, EntityId, EntitySlot, Identity, InternalId, PublicId, ScalarSlot, Uuid,
+    };
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    struct TestEntity;
+
+    impl Entity for TestEntity {
+        const KIND: Uuid = Uuid::from_u128(1);
+        const NAME: &'static str = "test_entity";
+        const CONTENT_SLOTS: &'static [ContentSlot] = &[];
+        const ENTITY_SLOTS: &'static [EntitySlot] = &[];
+        const SCALAR_SLOTS: &'static [ScalarSlot] = &[];
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum IdentityCall {
+        Mint,
+        ResolvePublic { public: Uuid },
+        ResolveInternal { internal: Uuid },
+    }
+
+    struct MockIdentityStore {
+        by_internal: Mutex<HashMap<Uuid, Uuid>>,
+        by_public: Mutex<HashMap<Uuid, Uuid>>,
+        calls: Mutex<Vec<IdentityCall>>,
+    }
+
+    impl MockIdentityStore {
+        fn new() -> Self {
+            Self {
+                by_internal: Mutex::new(HashMap::new()),
+                by_public: Mutex::new(HashMap::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn insert_identity(&self, identity: Identity) {
+            self.insert_raw(identity.internal, identity.public);
+        }
+
+        fn insert_raw(&self, internal: Uuid, public: Uuid) {
+            self.by_internal.lock().unwrap().insert(internal, public);
+            self.by_public.lock().unwrap().insert(public, internal);
+        }
+
+        fn calls(&self) -> Vec<IdentityCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IdentityStore for MockIdentityStore {
+        async fn mint(&self) -> Result<Identity, StoreError> {
+            self.calls.lock().unwrap().push(IdentityCall::Mint);
+            let identity = Identity {
+                internal: Uuid::now_v7(),
+                public: Uuid::new_v4(),
+            };
+            self.insert_identity(identity);
+            Ok(identity)
+        }
+
+        async fn resolve_public(&self, public: Uuid) -> Result<Option<Identity>, StoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(IdentityCall::ResolvePublic { public });
+            let Some(internal) = self.by_public.lock().unwrap().get(&public).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(Identity { internal, public }))
+        }
+
+        async fn resolve_internal(&self, internal: Uuid) -> Result<Option<Identity>, StoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(IdentityCall::ResolveInternal { internal });
+            let Some(public) = self.by_internal.lock().unwrap().get(&internal).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(Identity { internal, public }))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mint_typed_returns_v7_internal_and_v4_public() {
+        let store = MockIdentityStore::new();
+
+        let id: EntityId<TestEntity> = store.mint_typed::<TestEntity>().await.unwrap();
+
+        assert!(InternalId::<TestEntity>::from_uuid(id.internal().as_uuid()).is_ok());
+        assert!(PublicId::<TestEntity>::from_uuid(id.public().as_uuid()).is_ok());
+        assert_eq!(store.calls(), vec![IdentityCall::Mint]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_public_typed_returns_some_when_found() {
+        let store = MockIdentityStore::new();
+        let identity = Identity {
+            internal: Uuid::now_v7(),
+            public: Uuid::new_v4(),
+        };
+        store.insert_identity(identity);
+
+        let got = store
+            .resolve_public_typed::<TestEntity>(identity.public)
+            .await
+            .unwrap();
+
+        let got = got.unwrap();
+        assert_eq!(got.internal().as_uuid(), identity.internal);
+        assert_eq!(got.public().as_uuid(), identity.public);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_public_typed_returns_none_when_unknown() {
+        let store = MockIdentityStore::new();
+
+        let got = store
+            .resolve_public_typed::<TestEntity>(Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(got.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_internal_typed_returns_some_when_found() {
+        let store = MockIdentityStore::new();
+        let identity = Identity {
+            internal: Uuid::now_v7(),
+            public: Uuid::new_v4(),
+        };
+        store.insert_identity(identity);
+
+        let got = store
+            .resolve_internal_typed::<TestEntity>(identity.internal)
+            .await
+            .unwrap();
+
+        let got = got.unwrap();
+        assert_eq!(got.internal().as_uuid(), identity.internal);
+        assert_eq!(got.public().as_uuid(), identity.public);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_internal_typed_returns_none_when_unknown() {
+        let store = MockIdentityStore::new();
+
+        let got = store
+            .resolve_internal_typed::<TestEntity>(Uuid::now_v7())
+            .await
+            .unwrap();
+
+        assert!(got.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_public_typed_returns_identity_kind_error_for_malformed_pair() {
+        let store = MockIdentityStore::new();
+        let malformed_internal = Uuid::new_v4();
+        let public = Uuid::new_v4();
+        store.insert_raw(malformed_internal, public);
+
+        let err = store
+            .resolve_public_typed::<TestEntity>(public)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::IdentityKind(_)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_internal_typed_returns_identity_kind_error_for_malformed_pair() {
+        let store = MockIdentityStore::new();
+        let internal = Uuid::now_v7();
+        let malformed_public = Uuid::now_v7();
+        store.insert_raw(internal, malformed_public);
+
+        let err = store
+            .resolve_internal_typed::<TestEntity>(internal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::IdentityKind(_)));
+    }
+}
