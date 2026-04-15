@@ -7,6 +7,7 @@ license = "Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/metastable-void/philharmonic-store"
 readme = "README.md"
 rust-version = "1.85"
+description = "Storage substrate traits for the Philharmonic workflow orchestration system: content store, identity store, entity store. Backend-agnostic; implementations in companion crates."
 
 keywords = ["philharmonic", "storage", "content-addressed", "entity"]
 categories = ["data-structures"]
