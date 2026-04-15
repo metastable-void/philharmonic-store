@@ -1,6 +1,4 @@
-use philharmonic_types::{ContentDecodeError, IdKindError, IdentityKindError};
-
-use philharmonic_types::Uuid;
+use philharmonic_types::{ContentDecodeError, IdKindError, IdentityKindError, Uuid};
 
 /// Errors returned by the `philharmonic-store` substrate.
 ///
@@ -11,9 +9,10 @@ use philharmonic_types::Uuid;
 ///   expected. Suggests either a bug at the call site, schema drift, or
 ///   data produced by an incompatible writer.
 /// * Concurrency outcomes (`RevisionConflict`, `IdentityCollision`) — the
-///   requested operation lost a race against another writer or against
-///   astronomical UUID collision odds. The caller can retry; for revision
-///   conflicts, that means re-reading and incrementing the sequence.
+///   requested operation lost a race against another writer, or (for
+///   `IdentityCollision`) against astronomical UUID collision odds. The
+///   caller can retry; for revision conflicts, that means re-reading and
+///   incrementing the sequence.
 /// * Backend failures (`Backend`) — the storage backend reported an error
 ///   that doesn't map to a substrate-level semantic. Backend implementations
 ///   translate their internal errors here when no specific variant applies.
@@ -30,7 +29,7 @@ pub enum StoreError {
     /// An entity was retrieved with a kind UUID that didn't match the
     /// caller's expected kind.
     ///
-    /// Returned by typed read paths (e.g., `EntityStoreExt::get_typed`)
+    /// Returned by typed read paths (e.g., `EntityStoreExt::get_entity_typed`)
     /// when the row's stored kind disagrees with the type parameter.
     /// Indicates either a bug at the call site (asking for the wrong type)
     /// or schema drift (the same UUID being reused for different kinds
@@ -55,7 +54,7 @@ pub enum StoreError {
     /// Surfaces violations of the `InternalId`-is-UUIDv7 /
     /// `PublicId`-is-UUIDv4 invariant. Should never occur in practice
     /// because writes go through validating constructors, but the check
-    /// at the read boundary is cheap and catches schema corruption.
+    /// at the read boundary is cheap and catches data corruption.
     #[error("UUID version mismatch in storage: {0}")]
     IdKind(#[from] IdKindError),
 
@@ -87,16 +86,13 @@ pub enum StoreError {
     /// fails. The caller should re-read the latest revision and retry
     /// with an incremented sequence.
     #[error("revision conflict: entity {entity_id}, seq {revision_seq} already exists")]
-    RevisionConflict {
-        entity_id: Uuid,
-        revision_seq: u64,
-    },
+    RevisionConflict { entity_id: Uuid, revision_seq: u64 },
 
     /// An attempt to create an entity collided with an existing identity.
     ///
     /// Vanishingly rare with UUIDv7+UUIDv4 generation, but the check is
-    /// free given the unique constraints on `identity`. The caller should
-    /// mint a fresh identity and retry.
+    /// free given the unique constraints on the identity table. The caller
+    /// should mint a fresh identity and retry.
     #[error("identity collision: {uuid}")]
     IdentityCollision { uuid: Uuid },
 

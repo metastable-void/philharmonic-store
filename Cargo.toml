@@ -13,6 +13,6 @@ categories = ["data-structures"]
 
 [dependencies]
 async-trait = "0.1"
-philharmonic-types = "0.3.2"
+philharmonic-types = "0.3.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
