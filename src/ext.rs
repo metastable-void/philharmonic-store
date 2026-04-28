@@ -26,7 +26,7 @@ use async_trait::async_trait;
 /// `EntityStoreExt` alone, it belongs there; if it requires both traits,
 /// it belongs here.
 #[async_trait]
-pub trait StoreExt: IdentityStore + EntityStore {
+pub trait StoreExt: IdentityStore + EntityStore + Send + Sync {
     /// Mint a fresh identity and create an entity with it, in one call.
     ///
     /// Equivalent to:
@@ -50,7 +50,10 @@ pub trait StoreExt: IdentityStore + EntityStore {
     /// Errors are returned as-is: [`StoreError::IdentityCollision`] if
     /// UUID generation collides (vanishingly rare), or any backend
     /// error from either call.
-    async fn create_entity_minting<T: Entity>(&self) -> Result<EntityId<T>, StoreError> {
+    async fn create_entity_minting<T: Entity>(&self) -> Result<EntityId<T>, StoreError>
+    where
+        Self: Sized,
+    {
         let id = self.mint_typed::<T>().await?;
         self.create_entity_typed::<T>(id).await?;
         Ok(id)

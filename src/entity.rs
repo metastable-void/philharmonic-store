@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::revision::{RevisionInput, RevisionRef, RevisionRow};
 
-use philharmonic_types::{Entity, EntityId, Identity, ScalarValue, UnixMillis, Uuid};
+use philharmonic_types::{Entity, EntityId, Identity, ScalarValue, Sha256, UnixMillis, Uuid};
 
 use async_trait::async_trait;
 
@@ -153,6 +153,27 @@ pub trait EntityStore: Send + Sync {
         attribute_name: &str,
         value: &ScalarValue,
     ) -> Result<Vec<EntityRow>, StoreError>;
+
+    /// Find entities of a given kind whose latest revision has a content
+    /// attribute matching the given content hash.
+    ///
+    /// Used for indexed content-addressed queries: "find a principal by
+    /// credential hash", "find a minting authority by credential hash",
+    /// etc.
+    ///
+    /// Only queries the latest revision of each entity. For historical
+    /// queries ("entities whose revision N had this value"), callers need a
+    /// different API that doesn't yet exist.
+    async fn find_by_content(
+        &self,
+        _kind: Uuid,
+        _attribute_name: &str,
+        _content_hash: Sha256,
+    ) -> Result<Vec<EntityRow>, StoreError> {
+        Err(StoreError::Backend(crate::error::BackendError::fatal(
+            "find_by_content is not implemented by this store",
+        )))
+    }
 }
 
 /// Typed ergonomics on top of [`EntityStore`].
@@ -275,6 +296,21 @@ pub trait EntityStoreExt: EntityStore {
     ) -> Result<Vec<EntityRow>, StoreError> {
         self.find_by_scalar(T::KIND, attribute_name, value).await
     }
+
+    /// Find entities of kind `T` whose latest revision has the given
+    /// content-attribute hash.
+    ///
+    /// Equivalent to
+    /// [`EntityStore::find_by_content`](EntityStore::find_by_content)
+    /// with `T::KIND` as the kind argument, but expressed in one call.
+    async fn find_by_content_typed<T: Entity>(
+        &self,
+        attribute_name: &str,
+        content_hash: Sha256,
+    ) -> Result<Vec<EntityRow>, StoreError> {
+        self.find_by_content(T::KIND, attribute_name, content_hash)
+            .await
+    }
 }
 
 impl<S: EntityStore + ?Sized> EntityStoreExt for S {}
@@ -286,8 +322,8 @@ mod tests {
     use crate::revision::{RevisionInput, RevisionRef, RevisionRow};
 
     use philharmonic_types::{
-        ContentSlot, Entity, EntityId, EntitySlot, Identity, ScalarSlot, ScalarValue, UnixMillis,
-        Uuid,
+        ContentSlot, Entity, EntityId, EntitySlot, Identity, ScalarSlot, ScalarValue, Sha256,
+        UnixMillis, Uuid,
     };
 
     use std::collections::HashMap;
@@ -332,12 +368,18 @@ mod tests {
             attribute_name: String,
             value: ScalarValue,
         },
+        FindByContent {
+            kind: Uuid,
+            attribute_name: String,
+            content_hash: Sha256,
+        },
     }
 
     struct MockEntityStore {
         entities: Mutex<HashMap<Uuid, EntityRow>>,
         revisions: Mutex<HashMap<(Uuid, u64), RevisionRow>>,
         find_by_scalar_response: Mutex<Vec<EntityRow>>,
+        find_by_content_response: Mutex<Vec<EntityRow>>,
         calls: Mutex<Vec<EntityCall>>,
     }
 
@@ -347,6 +389,7 @@ mod tests {
                 entities: Mutex::new(HashMap::new()),
                 revisions: Mutex::new(HashMap::new()),
                 find_by_scalar_response: Mutex::new(Vec::new()),
+                find_by_content_response: Mutex::new(Vec::new()),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -364,6 +407,10 @@ mod tests {
 
         fn set_find_by_scalar_response(&self, rows: Vec<EntityRow>) {
             *self.find_by_scalar_response.lock().unwrap() = rows;
+        }
+
+        fn set_find_by_content_response(&self, rows: Vec<EntityRow>) {
+            *self.find_by_content_response.lock().unwrap() = rows;
         }
 
         fn calls(&self) -> Vec<EntityCall> {
@@ -485,6 +532,20 @@ mod tests {
                 value: value.clone(),
             });
             Ok(self.find_by_scalar_response.lock().unwrap().clone())
+        }
+
+        async fn find_by_content(
+            &self,
+            kind: Uuid,
+            attribute_name: &str,
+            content_hash: Sha256,
+        ) -> Result<Vec<EntityRow>, StoreError> {
+            self.calls.lock().unwrap().push(EntityCall::FindByContent {
+                kind,
+                attribute_name: attribute_name.to_string(),
+                content_hash,
+            });
+            Ok(self.find_by_content_response.lock().unwrap().clone())
         }
     }
 
@@ -660,6 +721,40 @@ mod tests {
                 } if *kind == TestEntityA::KIND
                     && attribute_name == "active"
                     && observed == &value
+            )
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn find_by_content_typed_delegates_kind_argument() {
+        let store = MockEntityStore::new();
+        let id = new_typed_id::<TestEntityA>();
+        let expected_row = EntityRow {
+            identity: id.untyped(),
+            kind: TestEntityA::KIND,
+            created_at: UnixMillis(12),
+        };
+        store.set_find_by_content_response(vec![expected_row.clone()]);
+        let content_hash = Sha256::of(b"credential hash");
+
+        let rows = store
+            .find_by_content_typed::<TestEntityA>("credential_hash", content_hash)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity, expected_row.identity);
+        assert_eq!(rows[0].kind, expected_row.kind);
+        assert!(store.calls().iter().any(|call| {
+            matches!(
+                call,
+                EntityCall::FindByContent {
+                    kind,
+                    attribute_name,
+                    content_hash: observed,
+                } if *kind == TestEntityA::KIND
+                    && attribute_name == "credential_hash"
+                    && *observed == content_hash
             )
         }));
     }
