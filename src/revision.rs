@@ -170,6 +170,7 @@ pub struct RevisionRef {
 }
 
 impl RevisionRef {
+    /// Create a reference to a specific entity revision.
     pub fn new(entity_id: Uuid, revision_seq: u64) -> Self {
         Self {
             entity_id,
