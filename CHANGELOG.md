@@ -9,6 +9,10 @@ this crate adheres to
 
 ## [Unreleased]
 
+## [0.1.2]
+
+- Added doc comments on error variant fields and revision fields.
+
 ## [0.1.1]
 
 - Bump `philharmonic-types` pin `0.3.4` → `0.3.5`. Picks up
