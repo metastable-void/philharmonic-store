@@ -36,7 +36,12 @@ pub enum StoreError {
     /// across deployments — which shouldn't happen given the global-UUID
     /// discipline, but the check is cheap).
     #[error("entity kind mismatch: expected {expected}, found {actual}")]
-    KindMismatch { expected: Uuid, actual: Uuid },
+    KindMismatch {
+        /// The kind UUID the caller expected.
+        expected: Uuid,
+        /// The kind UUID found in storage.
+        actual: Uuid,
+    },
 
     /// Bytes retrieved from the content store could not be decoded as the
     /// expected `Content` type.
@@ -74,7 +79,9 @@ pub enum StoreError {
     /// for an attribute whose row stores `value_i64`.
     #[error("scalar type mismatch for attribute {attribute_name}: {detail}")]
     ScalarTypeMismatch {
+        /// The attribute whose type was mismatched.
         attribute_name: String,
+        /// A human-readable description of the mismatch.
         detail: String,
     },
 
@@ -86,7 +93,12 @@ pub enum StoreError {
     /// fails. The caller should re-read the latest revision and retry
     /// with an incremented sequence.
     #[error("revision conflict: entity {entity_id}, seq {revision_seq} already exists")]
-    RevisionConflict { entity_id: Uuid, revision_seq: u64 },
+    RevisionConflict {
+        /// The entity whose revision conflicted.
+        entity_id: Uuid,
+        /// The revision sequence that was already taken.
+        revision_seq: u64,
+    },
 
     /// An attempt to create an entity collided with an existing identity.
     ///
@@ -94,7 +106,10 @@ pub enum StoreError {
     /// free given the unique constraints on the identity table. The caller
     /// should mint a fresh identity and retry.
     #[error("identity collision: {uuid}")]
-    IdentityCollision { uuid: Uuid },
+    IdentityCollision {
+        /// The UUID that collided.
+        uuid: Uuid,
+    },
 
     /// A write operation referenced an entity that doesn't exist.
     ///
@@ -102,7 +117,10 @@ pub enum StoreError {
     /// require a parent to exist. For example, `append_revision(entity_id, ...)`
     /// returns this if no entity with `entity_id` has been created.
     #[error("entity not found: {entity_id}")]
-    EntityNotFound { entity_id: Uuid },
+    EntityNotFound {
+        /// The internal ID of the missing entity.
+        entity_id: Uuid,
+    },
 
     /// The storage backend reported an error that doesn't map to a
     /// substrate-level semantic.
@@ -155,7 +173,9 @@ impl StoreError {
 #[derive(Debug, thiserror::Error)]
 #[error("backend error: {message}")]
 pub struct BackendError {
+    /// Human-readable error message (not stable, do not parse).
     pub message: String,
+    /// Whether the operation that caused this error is worth retrying.
     pub retryable: bool,
 }
 

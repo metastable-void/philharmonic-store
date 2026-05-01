@@ -165,7 +165,9 @@ pub struct RevisionRow {
 /// the two fields here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RevisionRef {
+    /// Internal ID of the entity.
     pub entity_id: Uuid,
+    /// Sequence number of the revision.
     pub revision_seq: u64,
 }
 
