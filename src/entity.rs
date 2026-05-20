@@ -26,6 +26,15 @@ pub struct EntityRow {
     pub created_at: UnixMillis,
 }
 
+/// Latest revision metadata for one entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LatestRevision {
+    /// Highest revision sequence recorded for the entity.
+    pub revision_seq: u64,
+    /// Creation timestamp of that highest revision row.
+    pub created_at: UnixMillis,
+}
+
 /// Append-only storage for entities and their revision logs.
 ///
 /// An `EntityStore` manages three concerns:
@@ -117,15 +126,15 @@ pub trait EntityStore: Send + Sync {
     async fn get_latest_revision(&self, entity_id: Uuid)
     -> Result<Option<RevisionRow>, StoreError>;
 
-    /// Return the latest revision timestamp for each requested entity.
+    /// Return the latest revision metadata for each requested entity.
     ///
     /// Entities with no revisions yet are omitted from the returned map.
-    async fn latest_revision_timestamps(
+    async fn latest_revisions(
         &self,
         _entity_ids: &[Uuid],
-    ) -> Result<HashMap<Uuid, UnixMillis>, StoreError> {
+    ) -> Result<HashMap<Uuid, LatestRevision>, StoreError> {
         Err(StoreError::Backend(crate::error::BackendError::fatal(
-            "latest_revision_timestamps is not implemented by this store",
+            "latest_revisions is not implemented by this store",
         )))
     }
 
@@ -330,7 +339,7 @@ impl<S: EntityStore + ?Sized> EntityStoreExt for S {}
 
 #[cfg(test)]
 mod tests {
-    use crate::entity::{EntityRow, EntityStore, EntityStoreExt};
+    use crate::entity::{EntityRow, EntityStore, EntityStoreExt, LatestRevision};
     use crate::error::StoreError;
     use crate::revision::{RevisionInput, RevisionRef, RevisionRow};
 
@@ -511,30 +520,30 @@ mod tests {
             Ok(latest)
         }
 
-        async fn latest_revision_timestamps(
+        async fn latest_revisions(
             &self,
             entity_ids: &[Uuid],
-        ) -> Result<HashMap<Uuid, UnixMillis>, StoreError> {
+        ) -> Result<HashMap<Uuid, LatestRevision>, StoreError> {
             let revisions = self.revisions.lock().unwrap();
-            let mut latest = HashMap::<Uuid, (u64, UnixMillis)>::new();
+            let mut latest = HashMap::<Uuid, LatestRevision>::new();
             for row in revisions.values() {
                 if !entity_ids.contains(&row.entity_id) {
                     continue;
                 }
                 latest
                     .entry(row.entity_id)
-                    .and_modify(|(revision_seq, created_at)| {
-                        if row.revision_seq > *revision_seq {
-                            *revision_seq = row.revision_seq;
-                            *created_at = row.created_at;
+                    .and_modify(|latest| {
+                        if row.revision_seq > latest.revision_seq {
+                            latest.revision_seq = row.revision_seq;
+                            latest.created_at = row.created_at;
                         }
                     })
-                    .or_insert((row.revision_seq, row.created_at));
+                    .or_insert(LatestRevision {
+                        revision_seq: row.revision_seq,
+                        created_at: row.created_at,
+                    });
             }
-            Ok(latest
-                .into_iter()
-                .map(|(entity_id, (_, created_at))| (entity_id, created_at))
-                .collect())
+            Ok(latest)
         }
 
         async fn list_revisions_referencing(
@@ -731,7 +740,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn latest_revision_timestamps_returns_highest_revision_timestamp() {
+    async fn latest_revisions_returns_highest_revision_data() {
         let store = MockEntityStore::new();
         let with_revisions = new_typed_id::<TestEntityA>();
         let without_revisions = new_typed_id::<TestEntityA>();
@@ -758,8 +767,8 @@ mod tests {
             },
         );
 
-        let timestamps = store
-            .latest_revision_timestamps(&[
+        let latest = store
+            .latest_revisions(&[
                 with_revisions.internal().as_uuid(),
                 without_revisions.internal().as_uuid(),
                 unknown,
@@ -768,11 +777,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            timestamps.get(&with_revisions.internal().as_uuid()),
-            Some(&UnixMillis(9))
+            latest.get(&with_revisions.internal().as_uuid()),
+            Some(&LatestRevision {
+                revision_seq: 2,
+                created_at: UnixMillis(9)
+            })
         );
-        assert!(!timestamps.contains_key(&without_revisions.internal().as_uuid()));
-        assert!(!timestamps.contains_key(&unknown));
+        assert!(!latest.contains_key(&without_revisions.internal().as_uuid()));
+        assert!(!latest.contains_key(&unknown));
     }
 
     #[tokio::test(flavor = "current_thread")]

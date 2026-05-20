@@ -41,7 +41,7 @@ pub(crate) mod identity;
 pub(crate) mod revision;
 
 pub use content::{ContentStore, ContentStoreExt};
-pub use entity::{EntityRow, EntityStore, EntityStoreExt};
+pub use entity::{EntityRow, EntityStore, EntityStoreExt, LatestRevision};
 pub use error::{BackendError, StoreError};
 pub use ext::StoreExt;
 pub use identity::{IdentityStore, IdentityStoreExt};
