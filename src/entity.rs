@@ -4,6 +4,7 @@ use crate::revision::{RevisionInput, RevisionRef, RevisionRow};
 use philharmonic_types::{Entity, EntityId, Identity, ScalarValue, Sha256, UnixMillis, Uuid};
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 /// An entity as read from the entity registry, independent of its revisions.
 ///
@@ -115,6 +116,18 @@ pub trait EntityStore: Send + Sync {
     /// monotonic per entity, this is unambiguous.
     async fn get_latest_revision(&self, entity_id: Uuid)
     -> Result<Option<RevisionRow>, StoreError>;
+
+    /// Return the latest revision timestamp for each requested entity.
+    ///
+    /// Entities with no revisions yet are omitted from the returned map.
+    async fn latest_revision_timestamps(
+        &self,
+        _entity_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, UnixMillis>, StoreError> {
+        Err(StoreError::Backend(crate::error::BackendError::fatal(
+            "latest_revision_timestamps is not implemented by this store",
+        )))
+    }
 
     /// List revisions that reference the given entity via the given
     /// attribute name.
@@ -498,6 +511,32 @@ mod tests {
             Ok(latest)
         }
 
+        async fn latest_revision_timestamps(
+            &self,
+            entity_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, UnixMillis>, StoreError> {
+            let revisions = self.revisions.lock().unwrap();
+            let mut latest = HashMap::<Uuid, (u64, UnixMillis)>::new();
+            for row in revisions.values() {
+                if !entity_ids.contains(&row.entity_id) {
+                    continue;
+                }
+                latest
+                    .entry(row.entity_id)
+                    .and_modify(|(revision_seq, created_at)| {
+                        if row.revision_seq > *revision_seq {
+                            *revision_seq = row.revision_seq;
+                            *created_at = row.created_at;
+                        }
+                    })
+                    .or_insert((row.revision_seq, row.created_at));
+            }
+            Ok(latest
+                .into_iter()
+                .map(|(entity_id, (_, created_at))| (entity_id, created_at))
+                .collect())
+        }
+
         async fn list_revisions_referencing(
             &self,
             target_entity_id: Uuid,
@@ -689,6 +728,51 @@ mod tests {
             row.scalar_attrs.get("active"),
             Some(&ScalarValue::Bool(true))
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn latest_revision_timestamps_returns_highest_revision_timestamp() {
+        let store = MockEntityStore::new();
+        let with_revisions = new_typed_id::<TestEntityA>();
+        let without_revisions = new_typed_id::<TestEntityA>();
+        let unknown = Uuid::new_v4();
+        store.insert_entity(with_revisions.untyped(), TestEntityA::KIND);
+        store.insert_entity(without_revisions.untyped(), TestEntityA::KIND);
+        store
+            .append_revision_typed::<TestEntityA>(with_revisions, 0, &RevisionInput::new())
+            .await
+            .unwrap();
+        store
+            .append_revision_typed::<TestEntityA>(with_revisions, 1, &RevisionInput::new())
+            .await
+            .unwrap();
+        store.revisions.lock().unwrap().insert(
+            (with_revisions.internal().as_uuid(), 2),
+            RevisionRow {
+                entity_id: with_revisions.internal().as_uuid(),
+                revision_seq: 2,
+                created_at: UnixMillis(9),
+                content_attrs: HashMap::new(),
+                entity_attrs: HashMap::new(),
+                scalar_attrs: HashMap::new(),
+            },
+        );
+
+        let timestamps = store
+            .latest_revision_timestamps(&[
+                with_revisions.internal().as_uuid(),
+                without_revisions.internal().as_uuid(),
+                unknown,
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            timestamps.get(&with_revisions.internal().as_uuid()),
+            Some(&UnixMillis(9))
+        );
+        assert!(!timestamps.contains_key(&without_revisions.internal().as_uuid()));
+        assert!(!timestamps.contains_key(&unknown));
     }
 
     #[tokio::test(flavor = "current_thread")]
